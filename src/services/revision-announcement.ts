@@ -1,5 +1,4 @@
 import { supabase } from '@/lib/supabase'
-import { createIsometric, createRevision } from './engineering'
 import type { AnnouncementRow, AnnouncementExcelRow, RevisionFile } from '@/types/engineering'
 
 /**
@@ -8,28 +7,68 @@ import type { AnnouncementRow, AnnouncementExcelRow, RevisionFile } from '@/type
 function safeExcelDateToISO(excelDate: any): string | null {
     if (!excelDate) return null
 
+    // Si es 0 o vacío, retornar null
+    if (excelDate === 0 || excelDate === '' || excelDate === null || excelDate === undefined) {
+        return null
+    }
+
     try {
         // Si ya es una fecha válida en formato string
-        if (typeof excelDate === 'string' && excelDate.includes('-')) {
-            const date = new Date(excelDate)
-            return isNaN(date.getTime()) ? null : date.toISOString()
+        if (typeof excelDate === 'string') {
+            // Verificar si es una fecha en formato ISO o similar
+            if (excelDate.includes('-') || excelDate.includes('/')) {
+                const date = new Date(excelDate)
+                if (!isNaN(date.getTime()) && date.getFullYear() > 1900 && date.getFullYear() < 2100) {
+                    return date.toISOString()
+                }
+            }
+            // Si es un string numérico, intentar parsearlo
+            const numValue = parseFloat(excelDate)
+            if (!isNaN(numValue) && numValue > 0 && numValue < 100000) {
+                excelDate = numValue
+            } else {
+                return null
+            }
         }
 
         // Si es un número serial de Excel (días desde 1900-01-01)
         if (typeof excelDate === 'number') {
+            // Validar que el número esté en un rango razonable
+            // Excel serial dates: 1 = 1900-01-01, ~45000 = 2023
+            if (excelDate < 1 || excelDate > 100000) {
+                console.warn('Excel date out of valid range:', excelDate)
+                return null
+            }
+
             // Excel serial date: días desde 1899-12-30
             const excelEpoch = new Date(1899, 11, 30)
             const date = new Date(excelEpoch.getTime() + excelDate * 24 * 60 * 60 * 1000)
-            return isNaN(date.getTime()) ? null : date.toISOString()
+
+            // Validar que la fecha resultante sea razonable
+            if (isNaN(date.getTime()) || date.getFullYear() < 1900 || date.getFullYear() > 2100) {
+                console.warn('Converted date out of valid range:', date)
+                return null
+            }
+
+            return date.toISOString()
         }
 
-        // Intentar conversión directa
-        const date = new Date(excelDate)
-        return isNaN(date.getTime()) ? null : date.toISOString()
+        return null
     } catch (error) {
         console.warn('Error converting date:', excelDate, error)
         return null
     }
+}
+
+/**
+ * Convierte fechas de Excel a formato DATE de PostgreSQL (YYYY-MM-DD)
+ */
+function safeExcelDateToSQL(excelDate: any): string | null {
+    const isoString = safeExcelDateToISO(excelDate)
+    if (!isoString) return null
+
+    // Extraer solo la parte de fecha (YYYY-MM-DD)
+    return isoString.split('T')[0]
 }
 
 /**
@@ -107,7 +146,7 @@ export async function processRevisionAnnouncement(projectId: string, excelRows: 
             // 1. Obtener o Crear Isométrico con metadata completa
             const firstRow = isoRows[0]
 
-            const { data: iso, error: isoError } = await supabase
+            const { data: iso } = await supabase
                 .from('isometrics')
                 .select('id, codigo')
                 .eq('proyecto_id', projectId)
@@ -150,92 +189,96 @@ export async function processRevisionAnnouncement(projectId: string, excelRows: 
 
             // 2. Procesar cada revisión
             for (const row of isoRows) {
-                // Verificar si la revisión existe
+                const revisionNumber = row.revision_number
+
+                // A. Verificar si la revisión YA EXISTE para este isométrico
                 const { data: existingRev } = await supabase
                     .from('isometric_revisions')
-                    .select('id')
+                    .select('id, codigo')
                     .eq('isometric_id', isometricId)
-                    .eq('codigo', row.revision_number)
+                    .eq('codigo', revisionNumber)
                     .single()
 
+                if (existingRev) {
+                    // REGLA DE NEGOCIO: No permitir carga duplicada. Omitir y alertar.
+                    results.errors++
+                    results.details.push(`⚠️ OMITIDO: El Isométrico ${isoCode} Revisión ${revisionNumber} ya existe. Edite la anterior si requiere cambios.`)
+                    continue // Saltar a la siguiente revisión
+                }
+
+                // B. Preparar datos para NUEVA revisión
+                const hasPdf = row.has_pdf === true || String(row.has_pdf) === '1'
+                const hasIdf = row.has_idf === true || String(row.has_idf) === '1'
+
                 const revisionData = {
-                    revision_number: row.revision_number,
+                    isometric_id: isometricId,
+                    codigo: revisionNumber,
+                    fecha_emision: safeExcelDateToSQL(row.transmittal_date) || new Date().toISOString().split('T')[0],
+
+                    // Trazabilidad de recepción
                     client_file_code: row.client_file_code || null,
                     client_revision_code: row.client_revision_code || null,
                     transmittal_code: row.transmittal_code || null,
                     transmittal_number: row.transmittal_number || null,
-                    transmittal_date: safeExcelDateToISO(row.transmittal_date),
-                    spooling_status: row.spooling_status || null,
-                    spooling_date: safeExcelDateToISO(row.spooling_date),
-                    spooling_sent_date: safeExcelDateToISO(row.spooling_sent_date),
-                    total_joints_count: row.total_joints_count || null,
-                    executed_joints_count: row.executed_joints_count || null,
-                    pending_joints_count: row.pending_joints_count || null,
-                    comment: row.comment || null
+                    transmittal_date: safeExcelDateToSQL(row.transmittal_date),
+
+                    // Estado de Spooling
+                    spooling_status: row.spooling_status || 'PENDIENTE',
+                    spooling_date: safeExcelDateToSQL(row.spooling_date),
+                    spooling_sent_date: safeExcelDateToSQL(row.spooling_sent_date),
+
+                    // Conteos
+                    total_joints_count: row.total_joints_count || 0,
+                    executed_joints_count: row.executed_joints_count || 0,
+                    pending_joints_count: row.pending_joints_count || 0,
+
+                    // Metadata adicional
+                    comment: row.comment || null,
+                    estado: 'VIGENTE',
+
+                    // Flags de formato
+                    has_pdf: hasPdf,
+                    has_idf: hasIdf
                 }
 
-                if (existingRev) {
-                    // Actualizar revisión existente
-                    await supabase
-                        .from('isometric_revisions')
-                        .update(revisionData)
-                        .eq('id', existingRev.id)
-                } else {
-                    // Crear nueva revisión
-                    await supabase
-                        .from('isometric_revisions')
-                        .insert({
-                            isometric_id: isometricId,
-                            codigo: row.revision_number,
-                            estado: 'PENDIENTE',
-                            fecha_emision: new Date().toISOString(),
-                            ...revisionData
-                        })
+                // C. Insertar Nueva Revisión
+                const { error: insertError } = await supabase
+                    .from('isometric_revisions')
+                    .insert(revisionData)
+
+                if (insertError) {
+                    results.errors++
+                    results.details.push(`❌ Error creando revisión ${isoCode} Rev ${revisionNumber}: ${insertError.message}`)
+                    continue
                 }
+
+                results.processed++
+                results.details.push(`✅ Creada: ${isoCode} Rev ${revisionNumber}`)
             }
 
             // 3. Determinar VIGENTE (Revisión más alta)
             const { data: allRevs } = await supabase
                 .from('isometric_revisions')
-                .select('id, codigo, revision_number')
+                .select('id, codigo, created_at')
                 .eq('isometric_id', isometricId)
+                .order('created_at', { ascending: true })
 
             if (allRevs && allRevs.length > 0) {
-                // Ordenar por número de revisión (intentar numérico, fallback a string)
-                const sortedRevs = allRevs.sort((a, b) => {
-                    const revA = a.revision_number || a.codigo
-                    const revB = b.revision_number || b.codigo
-                    const numA = parseInt(revA)
-                    const numB = parseInt(revB)
-                    if (!isNaN(numA) && !isNaN(numB)) return numA - numB
-                    return revA.localeCompare(revB)
-                })
+                const latestRev = allRevs[allRevs.length - 1]
 
-                const latestRev = sortedRevs[sortedRevs.length - 1]
-
-                // Marcar la última como VIGENTE
-                await supabase
-                    .from('isometric_revisions')
-                    .update({ estado: 'VIGENTE' })
-                    .eq('id', latestRev.id)
-
-                // Marcar las demás como OBSOLETA
-                const otherIds = sortedRevs.filter(r => r.id !== latestRev.id).map(r => r.id)
-                if (otherIds.length > 0) {
-                    await supabase
-                        .from('isometric_revisions')
-                        .update({ estado: 'OBSOLETA' })
-                        .in('id', otherIds)
-                }
-
-                // Actualizar puntero current_revision_id
                 await supabase
                     .from('isometrics')
                     .update({ current_revision_id: latestRev.id })
                     .eq('id', isometricId)
-            }
 
-            results.processed++
+                for (const rev of allRevs) {
+                    const esVigente = rev.id === latestRev.id
+                    await supabase
+                        .from('isometric_revisions')
+                        .update({ estado: esVigente ? 'VIGENTE' : 'OBSOLETA' })
+                        .eq('id', rev.id)
+                }
+            }
 
         } catch (error: any) {
             console.error(`Error procesando ISO ${isoCode}:`, error)
@@ -248,17 +291,49 @@ export async function processRevisionAnnouncement(projectId: string, excelRows: 
 }
 
 /**
- * Sube un archivo PDF/IDF para una revisión específica
+ * Sube un archivo físico a Supabase Storage y lo registra en revision_files
  */
-export async function uploadRevisionFile(
+export async function uploadPDFToRevision(
     revisionId: string,
-    fileUrl: string,
+    file: File,
     fileType: 'pdf' | 'idf' | 'dwg' | 'other' = 'pdf',
-    fileName?: string,
     isPrimary: boolean = false
-): Promise<RevisionFile | null> {
+): Promise<{ success: boolean; message: string; file?: RevisionFile }> {
     try {
-        // Obtener el siguiente version_number para esta revisión
+        const allowedTypes: Record<string, string[]> = {
+            pdf: ['application/pdf'],
+            idf: ['application/octet-stream', 'text/plain'],
+            dwg: ['application/acad', 'application/x-acad', 'application/autocad_dwg', 'image/x-dwg']
+        }
+
+        if (fileType !== 'other' && !allowedTypes[fileType]?.some(type => file.type.includes(type) || file.name.toLowerCase().endsWith(`.${fileType}`))) {
+            return { success: false, message: `El archivo debe ser de tipo ${fileType.toUpperCase()}` }
+        }
+
+        const timestamp = Date.now()
+        const sanitizedFileName = file.name.replace(/[^a-zA-Z0-9.-]/g, '_')
+        const storagePath = `revisions/${revisionId}/${fileType}/${timestamp}_${sanitizedFileName}`
+
+        const { data: uploadData, error: uploadError } = await supabase.storage
+            .from('revision-files')
+            .upload(storagePath, file, {
+                cacheControl: '3600',
+                upsert: false
+            })
+
+        if (uploadError) {
+            console.error('Error uploading to storage:', uploadError)
+            return { success: false, message: `Error al subir archivo: ${uploadError.message}` }
+        }
+
+        const { data: urlData } = await supabase.storage
+            .from('revision-files')
+            .createSignedUrl(storagePath, 60 * 60 * 24 * 365)
+
+        if (!urlData?.signedUrl) {
+            return { success: false, message: 'Error al generar URL del archivo' }
+        }
+
         const { data: existingFiles } = await supabase
             .from('revision_files')
             .select('version_number')
@@ -271,7 +346,6 @@ export async function uploadRevisionFile(
             ? existingFiles[0].version_number + 1
             : 1
 
-        // Si este archivo se marca como primario, desmarcar los demás
         if (isPrimary) {
             await supabase
                 .from('revision_files')
@@ -280,31 +354,42 @@ export async function uploadRevisionFile(
                 .eq('file_type', fileType)
         }
 
-        // Insertar el nuevo archivo
-        const { data, error } = await supabase
+        const { data: { user } } = await supabase.auth.getUser()
+
+        const { data: dbFile, error: dbError } = await supabase
             .from('revision_files')
             .insert({
                 revision_id: revisionId,
-                file_url: fileUrl,
+                file_url: storagePath,
                 file_type: fileType,
-                file_name: fileName,
+                file_name: file.name,
                 version_number: nextVersion,
-                is_primary: isPrimary
+                is_primary: isPrimary,
+                file_size_bytes: file.size,
+                uploaded_by: user?.id
             })
             .select()
             .single()
 
-        if (error) throw error
-        return data as RevisionFile
+        if (dbError) {
+            await supabase.storage.from('revision-files').remove([storagePath])
+            return { success: false, message: `Error al registrar archivo: ${dbError.message}` }
+        }
+
+        return {
+            success: true,
+            message: 'Archivo subido exitosamente',
+            file: dbFile as RevisionFile
+        }
 
     } catch (error: any) {
-        console.error('Error al subir archivo de revisión:', error)
-        return null
+        console.error('Error en uploadPDFToRevision:', error)
+        return { success: false, message: error.message || 'Error desconocido al subir archivo' }
     }
 }
 
 /**
- * Obtiene todos los archivos de una revisión
+ * Obtiene todos los archivos de una revisión con URLs firmadas
  */
 export async function getRevisionFiles(revisionId: string): Promise<RevisionFile[]> {
     const { data, error } = await supabase
@@ -319,5 +404,18 @@ export async function getRevisionFiles(revisionId: string): Promise<RevisionFile
         return []
     }
 
-    return data as RevisionFile[]
+    const filesWithUrls = await Promise.all(
+        (data || []).map(async (file) => {
+            const { data: urlData } = await supabase.storage
+                .from('revision-files')
+                .createSignedUrl(file.file_url, 60 * 60 * 24)
+
+            return {
+                ...file,
+                signed_url: urlData?.signedUrl || null
+            }
+        })
+    )
+
+    return filesWithUrls as RevisionFile[]
 }

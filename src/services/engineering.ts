@@ -5,19 +5,36 @@ import { calculateDiff, saveImpacts } from './impact-analysis'
 // --- ISOMETRICOS ---
 
 export async function getIsometrics(projectId: string) {
-    const { data, error } = await supabase
-        .from('isometrics')
-        .select(`
-            *,
-            revisions:isometric_revisions(
-                id, codigo, estado, fecha_emision, pdf_url, fecha_anuncio, description
-            )
-        `)
-        .eq('proyecto_id', projectId)
-        .order('codigo', { ascending: true })
+    console.log('[getIsometrics] Starting with projectId:', projectId)
 
-    if (error) throw error
-    return data
+    try {
+        const { data, error } = await supabase
+            .from('isometrics')
+            .select(`
+                *,
+                revisions:isometric_revisions!isometric_id(*)
+            `)
+            .eq('proyecto_id', projectId)
+            .order('codigo', { ascending: true })
+
+        console.log('[getIsometrics] Query result:', {
+            hasData: !!data,
+            dataLength: data?.length,
+            hasError: !!error,
+            error: error
+        })
+
+        if (error) {
+            console.error('[getIsometrics] Supabase error:', error)
+            throw error
+        }
+
+        console.log('[getIsometrics] Returning data:', data?.length, 'isometrics')
+        return data
+    } catch (err) {
+        console.error('[getIsometrics] Caught error:', err)
+        throw err
+    }
 }
 
 export async function createIsometric(projectId: string, codigo: string, metadata: Partial<Isometrico> = {}) {
