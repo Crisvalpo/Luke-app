@@ -2,26 +2,41 @@
 
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { getCurrentUser, signOut } from '@/services/auth'
-import { User } from '@/types/user'
+import { getCurrentUser, signOut, isSuperAdmin, isProjectAdmin } from '@/services/auth'
+import { getMyProyecto } from '@/services/proyectos'
+import ProtectedRoute from '@/components/ProtectedRoute'
+import type { User, ProyectoWithEmpresa } from '@/types'
 
-export default function DashboardPage() {
+function DashboardContent() {
     const router = useRouter()
     const [user, setUser] = useState<User | null>(null)
+    const [proyecto, setProyecto] = useState<ProyectoWithEmpresa | null>(null)
+    const [esSuperAdmin, setEsSuperAdmin] = useState(false)
+    const [esAdminProyecto, setEsAdminProyecto] = useState(false)
     const [loading, setLoading] = useState(true)
 
     useEffect(() => {
-        async function loadUser() {
+        async function loadData() {
             const currentUser = await getCurrentUser()
-            if (!currentUser) {
-                router.push('/login')
-            } else {
+            if (currentUser) {
                 setUser(currentUser)
+
+                // Verificar permisos
+                const superAdmin = await isSuperAdmin()
+                const adminProyecto = await isProjectAdmin()
+                setEsSuperAdmin(superAdmin)
+                setEsAdminProyecto(adminProyecto)
+
+                // Cargar proyecto si no es super admin
+                if (!superAdmin && currentUser.proyecto_id) {
+                    const proyectoData = await getMyProyecto()
+                    setProyecto(proyectoData)
+                }
             }
             setLoading(false)
         }
-        loadUser()
-    }, [router])
+        loadData()
+    }, [])
 
     const handleSignOut = async () => {
         await signOut()
@@ -51,12 +66,20 @@ export default function DashboardPage() {
                             <p className="text-purple-200">Bienvenido de vuelta, {user.nombre}</p>
                         </div>
                         <div className="flex gap-3">
-                            {user.rol?.toUpperCase() === 'ADMIN' && (
+                            {esSuperAdmin && (
                                 <button
-                                    onClick={() => router.push('/admin')}
+                                    onClick={() => router.push('/admin/super')}
+                                    className="px-6 py-3 bg-yellow-500/20 hover:bg-yellow-500/30 border border-yellow-400/50 text-yellow-200 rounded-xl transition-all duration-200 transform hover:scale-105"
+                                >
+                                    ⚡ Super Admin
+                                </button>
+                            )}
+                            {esAdminProyecto && !esSuperAdmin && (
+                                <button
+                                    onClick={() => router.push('/admin/proyecto')}
                                     className="px-6 py-3 bg-purple-500/20 hover:bg-purple-500/30 border border-purple-400/50 text-purple-200 rounded-xl transition-all duration-200 transform hover:scale-105"
                                 >
-                                    👨‍💼 Panel Admin
+                                    👨‍💼 Gestionar Proyecto
                                 </button>
                             )}
                             <button
@@ -68,6 +91,98 @@ export default function DashboardPage() {
                         </div>
                     </div>
                 </div>
+
+                {/* Mensaje para usuarios sin proyecto */}
+                {!esSuperAdmin && !proyecto && (
+                    <div className="backdrop-blur-xl bg-blue-500/10 rounded-3xl shadow-2xl border border-blue-400/20 p-6 mb-6 animate-fade-in">
+                        <div className="flex items-start gap-4">
+                            <div className="p-3 bg-blue-500/20 rounded-xl">
+                                <svg className="w-8 h-8 text-blue-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                </svg>
+                            </div>
+                            <div>
+                                <h2 className="text-xl font-bold text-white mb-2">¡Bienvenido a la empresa!</h2>
+                                <p className="text-blue-100 mb-2">
+                                    Tu cuenta ha sido aprobada y vinculada a la empresa correctamente.
+                                </p>
+                                <p className="text-blue-200 text-sm">
+                                    Actualmente no tienes un proyecto asignado. Un administrador te asignará a uno pronto.
+                                    Mientras tanto, puedes revisar tu perfil.
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* Proyecto Info (solo si no es super admin) */}
+                {!esSuperAdmin && proyecto && (
+                    <div className="backdrop-blur-xl bg-white/10 rounded-3xl shadow-2xl border border-white/20 p-6 mb-6">
+                        <h2 className="text-2xl font-bold text-white mb-4">Tu Proyecto</h2>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <p className="text-purple-200 text-sm">Empresa</p>
+                                <p className="text-white text-xl font-semibold">{proyecto.empresa?.nombre}</p>
+                            </div>
+                            <div>
+                                <p className="text-purple-200 text-sm">Proyecto</p>
+                                <p className="text-white text-xl font-semibold">{proyecto.nombre}</p>
+                            </div>
+                            <div>
+                                <p className="text-purple-200 text-sm">Código</p>
+                                <p className="text-white text-lg font-mono">{proyecto.codigo}</p>
+                            </div>
+                            <div>
+                                <p className="text-purple-200 text-sm">Estado</p>
+                                <span className={`inline-block px-3 py-1 rounded-lg text-sm font-medium ${proyecto.estado === 'ACTIVO'
+                                    ? 'bg-green-500/20 border border-green-400/50 text-green-200'
+                                    : proyecto.estado === 'PAUSADO'
+                                        ? 'bg-yellow-500/20 border border-yellow-400/50 text-yellow-200'
+                                        : 'bg-gray-500/20 border border-gray-400/50 text-gray-200'
+                                    }`}>
+                                    {proyecto.estado}
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* Acciones Rápidas para Admin de Proyecto */}
+                {esAdminProyecto && !esSuperAdmin && (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                        <div
+                            onClick={() => router.push('/admin/proyecto/invitar')}
+                            className="cursor-pointer backdrop-blur-xl bg-gradient-to-br from-blue-600/20 to-cyan-600/20 rounded-3xl shadow-xl border border-blue-400/30 p-6 transform transition-all duration-200 hover:scale-[1.02] group"
+                        >
+                            <div className="flex items-center justify-between mb-4">
+                                <div className="p-3 bg-blue-500 rounded-xl group-hover:bg-blue-400 transition-colors shadow-lg shadow-blue-500/30">
+                                    <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z" />
+                                    </svg>
+                                </div>
+                                <span className="px-3 py-1 bg-blue-500/20 border border-blue-400/30 text-blue-200 rounded-full text-xs font-medium">Acción Rápida</span>
+                            </div>
+                            <h3 className="text-2xl font-bold text-white mb-2">Invitar Miembros</h3>
+                            <p className="text-blue-100">Agrega nuevos usuarios a tu equipo de trabajo y asigna sus roles.</p>
+                        </div>
+
+                        <div
+                            onClick={() => router.push('/admin/proyecto/equipo')}
+                            className="cursor-pointer backdrop-blur-xl bg-gradient-to-br from-purple-600/20 to-pink-600/20 rounded-3xl shadow-xl border border-purple-400/30 p-6 transform transition-all duration-200 hover:scale-[1.02] group"
+                        >
+                            <div className="flex items-center justify-between mb-4">
+                                <div className="p-3 bg-purple-500 rounded-xl group-hover:bg-purple-400 transition-colors shadow-lg shadow-purple-500/30">
+                                    <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+                                    </svg>
+                                </div>
+                                <span className="px-3 py-1 bg-purple-500/20 border border-purple-400/30 text-purple-200 rounded-full text-xs font-medium">Gestión</span>
+                            </div>
+                            <h3 className="text-2xl font-bold text-white mb-2">Gestionar Equipo</h3>
+                            <p className="text-purple-100">Administra los roles, permisos y acceso de los miembros de tu equipo.</p>
+                        </div>
+                    </div>
+                )}
 
                 {/* User Info Cards */}
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -126,7 +241,7 @@ export default function DashboardPage() {
                             </div>
                             <div>
                                 <p className="text-purple-200 text-sm">Rol</p>
-                                <p className="text-white text-lg font-semibold capitalize">{user.rol}</p>
+                                <p className="text-white text-lg font-semibold">{user.rol}</p>
                             </div>
                         </div>
                     </div>
@@ -138,10 +253,19 @@ export default function DashboardPage() {
                     <div className="space-y-3 text-purple-100">
                         <p>✨ Tu cuenta está activa y verificada</p>
                         <p>🔒 Todos tus datos están protegidos con encriptación de nivel empresarial</p>
-                        <p>📱 Puedes actualizar tu información en cualquier momento</p>
+                        {esAdminProyecto && <p>👨‍💼 Tienes permisos de administrador de proyecto</p>}
+                        {esSuperAdmin && <p>⚡ Tienes permisos de super administrador</p>}
                     </div>
                 </div>
             </div>
         </div>
+    )
+}
+
+export default function DashboardPage() {
+    return (
+        <ProtectedRoute requireAuth requireActive requireProject={false}>
+            <DashboardContent />
+        </ProtectedRoute>
     )
 }

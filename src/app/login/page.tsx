@@ -21,7 +21,35 @@ export default function LoginPage() {
 
         const response = await signIn(formData.correo, formData.password)
 
-        if (response.success) {
+        if (response.success && response.user) {
+            // Redirigir según el estado del usuario
+            const user = response.user
+
+            // SUPER_ADMIN siempre va al dashboard
+            if (user.rol?.toUpperCase() === 'SUPER_ADMIN') {
+                router.push('/dashboard')
+                return
+            }
+
+            // Usuario ACTIVO con proyecto → dashboard
+            if (user.estado_usuario === 'ACTIVO' && user.proyecto_id) {
+                router.push('/dashboard')
+                return
+            }
+
+            // Usuario PENDIENTE sin proyecto → onboarding
+            if (user.estado_usuario === 'PENDIENTE' && !user.proyecto_id) {
+                router.push('/onboarding')
+                return
+            }
+
+            // Usuario PENDIENTE con proyecto o RECHAZADO → pendiente
+            if (user.estado_usuario === 'PENDIENTE' || user.estado_usuario === 'RECHAZADO') {
+                router.push('/pendiente')
+                return
+            }
+
+            // Por defecto, ir al dashboard
             router.push('/dashboard')
         } else {
             setError(response.message)

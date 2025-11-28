@@ -1,12 +1,21 @@
 'use client'
 
-import { useState } from 'react'
-import { useRouter } from 'next/navigation'
-import { signUp } from '@/services/auth'
+import { useState, useEffect, Suspense } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
+import { signUp, signOut } from '@/services/auth'
+import { validateToken, markInvitacionAsUsed, type Invitacion } from '@/services/invitaciones'
 import Link from 'next/link'
 
-export default function RegistroPage() {
+function RegistroForm() {
     const router = useRouter()
+    const searchParams = useSearchParams()
+    const token = searchParams.get('token')
+
+
+    const [invitacion, setInvitacion] = useState<Invitacion | null>(null)
+    const [validandoToken, setValidandoToken] = useState(!!token)
+    const [tokenInvalido, setTokenInvalido] = useState(false)
+
     const [formData, setFormData] = useState({
         nombre: '',
         correo: '',
@@ -16,6 +25,36 @@ export default function RegistroPage() {
     })
     const [loading, setLoading] = useState(false)
     const [error, setError] = useState('')
+
+    // Validar token de invitación al cargar y limpiar sesión previa
+    useEffect(() => {
+        async function init() {
+            // Asegurar que no haya sesión activa al intentar registrarse
+            await signOut()
+
+            if (!token) {
+                setValidandoToken(false)
+                return
+            }
+
+            const resultado = await validateToken(token)
+
+            if (resultado.success && resultado.data) {
+                setInvitacion(resultado.data)
+                // Pre-llenar el email si viene en la invitación
+                setFormData(prev => ({
+                    ...prev,
+                    correo: resultado.data!.email
+                }))
+            } else {
+                setTokenInvalido(true)
+            }
+
+            setValidandoToken(false)
+        }
+
+        init()
+    }, [token])
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault()
@@ -38,16 +77,38 @@ export default function RegistroPage() {
         // Agregar +56 automáticamente al teléfono
         const telefonoConPrefijo = `+56${formData.telefono.replace(/^\+56/, '')}`
 
+        // Determinar el rol según si hay invitación o no
+        const rol = invitacion ? invitacion.rol : 'USUARIO' // Default usuario si no hay invitación
+
         const response = await signUp({
             nombre: formData.nombre,
             correo: formData.correo,
             telefono: telefonoConPrefijo,
-            rol: 'SOLO LECTURA', // Rol por defecto
+            rol: rol,
             password: formData.password,
+            // Campos multi-tenant
+            empresa_id: invitacion?.empresa_id || null,
+            proyecto_id: invitacion?.proyecto_id || null, // Si la invitación tiene proyecto específico
+            es_admin_proyecto: false,
+            estado_usuario: invitacion ? 'ACTIVO' : 'PENDIENTE',
+            invitado_por: null, // Podríamos guardar quién invitó si lo tuviéramos en la invitación
+            token_invitacion: token || null,
         })
 
         if (response.success) {
-            router.push('/login')
+            // Si hay invitación, marcarla como usada
+            if (token && response.user?.id) {
+                await markInvitacionAsUsed(token, response.user.id)
+            }
+
+            // Redirigir según el estado
+            if (invitacion) {
+                // Con invitación → Ir directo al dashboard
+                router.push('/dashboard')
+            } else {
+                // Sin invitación → Ir a onboarding (ahora solo para unirse a empresas)
+                window.location.href = '/onboarding'
+            }
         } else {
             // Mensaje amigable para correo duplicado
             if (response.message.includes('duplicate key') || response.message.includes('users_correo_key')) {
@@ -58,6 +119,45 @@ export default function RegistroPage() {
         }
 
         setLoading(false)
+    }
+
+    // Mostrar loading mientras valida el token
+    if (validandoToken) {
+        return (
+            <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-900 via-purple-900 to-pink-900">
+                <div className="text-center">
+                    <div className="animate-spin rounded-full h-16 w-16 border-t-2 border-b-2 border-white mx-auto mb-4"></div>
+                    <p className="text-white text-lg">Validando invitación...</p>
+                </div>
+            </div>
+        )
+    }
+
+    // Mostrar error si el token es inválido
+    if (tokenInvalido) {
+        return (
+            <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-900 via-purple-900 to-pink-900 p-4">
+                <div className="w-full max-w-md">
+                    <div className="backdrop-blur-xl bg-white/10 rounded-3xl shadow-2xl border border-white/20 p-8 text-center">
+                        <div className="inline-block p-4 bg-red-500/20 rounded-2xl mb-4">
+                            <svg className="w-12 h-12 text-red-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                            </svg>
+                        </div>
+                        <h1 className="text-2xl font-bold text-white mb-2">Invitación Inválida</h1>
+                        <p className="text-purple-200 mb-6">
+                            El link de invitación no es válido o ya ha sido utilizado.
+                        </p>
+                        <Link
+                            href="/registro"
+                            className="inline-block px-6 py-3 bg-gradient-to-r from-blue-500 to-purple-500 text-white font-semibold rounded-xl hover:shadow-lg transition-all duration-200"
+                        >
+                            Registrarse sin invitación
+                        </Link>
+                    </div>
+                </div>
+            </div>
+        )
     }
 
     return (
@@ -81,9 +181,27 @@ export default function RegistroPage() {
                                 />
                             </svg>
                         </div>
-                        <h1 className="text-4xl font-bold text-white mb-2">Crear Cuenta</h1>
-                        <p className="text-purple-200">Únete a nosotros hoy</p>
+                        <h1 className="text-4xl font-bold text-white mb-2">
+                            {invitacion ? 'Aceptar Invitación' : 'Crear Cuenta'}
+                        </h1>
+                        <p className="text-purple-200">
+                            {invitacion
+                                ? `Has sido invitado a unirte a ${invitacion.empresa?.nombre}`
+                                : 'Únete a nosotros hoy'
+                            }
+                        </p>
                     </div>
+
+                    {/* Info de invitación */}
+                    {invitacion && (
+                        <div className="mb-6 bg-green-500/20 border border-green-400/50 text-green-200 px-4 py-3 rounded-xl">
+                            <p className="text-sm font-medium mb-2">✅ Invitación Válida</p>
+                            <div className="text-sm space-y-1">
+                                <p><strong>Empresa:</strong> {invitacion.empresa?.nombre}</p>
+                                <p><strong>Rol asignado:</strong> {invitacion.rol}</p>
+                            </div>
+                        </div>
+                    )}
 
                     {/* Formulario */}
                     <form onSubmit={handleSubmit} className="space-y-5">
@@ -93,7 +211,7 @@ export default function RegistroPage() {
                             </div>
                         )}
 
-                        {/* Nombre completo (full width) */}
+                        {/* Nombre completo */}
                         <div className="space-y-2">
                             <label htmlFor="nombre" className="block text-sm font-medium text-purple-100">
                                 Nombre Completo
@@ -109,7 +227,7 @@ export default function RegistroPage() {
                             />
                         </div>
 
-                        {/* Email (full width) */}
+                        {/* Email */}
                         <div className="space-y-2">
                             <label htmlFor="correo" className="block text-sm font-medium text-purple-100">
                                 Correo Electrónico
@@ -120,12 +238,16 @@ export default function RegistroPage() {
                                 required
                                 value={formData.correo}
                                 onChange={(e) => setFormData({ ...formData, correo: e.target.value })}
-                                className="block w-full px-4 py-3 bg-white/10 border border-white/20 rounded-xl text-white placeholder-purple-300 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all duration-200"
+                                disabled={!!invitacion}
+                                className="block w-full px-4 py-3 bg-white/10 border border-white/20 rounded-xl text-white placeholder-purple-300 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
                                 placeholder="tu@email.com"
                             />
+                            {invitacion && (
+                                <p className="text-xs text-purple-300">Email pre-asignado por la invitación</p>
+                            )}
                         </div>
 
-                        {/* Teléfono (Chile) */}
+                        {/* Teléfono */}
                         <div className="space-y-2">
                             <label htmlFor="telefono" className="block text-sm font-medium text-purple-100">
                                 Teléfono (Chile)
@@ -185,11 +307,13 @@ export default function RegistroPage() {
                         </div>
 
                         {/* Información sobre el rol */}
-                        <div className="bg-blue-500/20 border border-blue-400/50 text-blue-200 px-4 py-3 rounded-xl">
-                            <p className="text-sm">
-                                ℹ️ Tu cuenta será creada con permisos de <strong>Solo Lectura</strong>. Un administrador te asignará tu rol definitivo según tus funciones en el proyecto.
-                            </p>
-                        </div>
+                        {!invitacion && (
+                            <div className="bg-blue-500/20 border border-blue-400/50 text-blue-200 px-4 py-3 rounded-xl">
+                                <p className="text-sm">
+                                    ℹ️ Tu cuenta será creada con estado <strong>PENDIENTE</strong>. Deberás completar información sobre tu empresa y proyecto, y esperar la aprobación de un administrador.
+                                </p>
+                            </div>
+                        )}
 
                         {/* Submit Button */}
                         <button
@@ -218,7 +342,7 @@ export default function RegistroPage() {
                                     Registrando...
                                 </span>
                             ) : (
-                                'Crear Cuenta'
+                                invitacion ? 'Aceptar Invitación y Crear Cuenta' : 'Crear Cuenta'
                             )}
                         </button>
                     </form>
@@ -240,3 +364,16 @@ export default function RegistroPage() {
         </div>
     )
 }
+
+export default function RegistroPage() {
+    return (
+        <Suspense fallback={
+            <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-900 via-purple-900 to-pink-900">
+                <div className="animate-spin rounded-full h-16 w-16 border-t-2 border-b-2 border-white"></div>
+            </div>
+        }>
+            <RegistroForm />
+        </Suspense>
+    )
+}
+
